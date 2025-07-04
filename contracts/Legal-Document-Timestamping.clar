@@ -5,6 +5,9 @@
 (define-constant ERR_INVALID_HASH (err u103))
 (define-constant ERR_INVALID_TITLE (err u104))
 (define-constant ERR_VERIFICATION_FAILED (err u105))
+(define-constant ERR_INVALID_EXPIRATION_DATE (err u202))
+(define-constant ERR_DOCUMENT_EXPIRED (err u203))
+(define-constant ERR_ALREADY_RENEWED (err u204))
 
 (define-data-var document-counter uint u0)
 
@@ -201,4 +204,127 @@
 
 (define-private (is-some-document (doc (optional { hash: (buff 32), title: (string-ascii 100), author: principal, timestamp: uint, block-height: uint, verified: bool })))
   (is-some doc)
+)
+
+(define-map document-expiration
+  { document-hash: (buff 32) }
+  {
+    expiration-date: uint,
+    renewable: bool,
+    renewal-period: uint,
+    renewal-count: uint,
+    last-renewed: uint,
+    created-by: principal
+  }
+)
+
+(define-map expired-documents
+  { document-hash: (buff 32) }
+  { expired-at: uint }
+)
+
+(define-public (set-document-expiration (document-hash (buff 32)) (expiration-date uint) (renewable bool) (renewal-period uint))
+  (let
+    (
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    )
+    (asserts! (> expiration-date current-time) ERR_INVALID_EXPIRATION_DATE)
+    (asserts! (is-none (map-get? document-expiration { document-hash: document-hash })) ERR_ALREADY_RENEWED)
+    
+    (map-set document-expiration
+      { document-hash: document-hash }
+      {
+        expiration-date: expiration-date,
+        renewable: renewable,
+        renewal-period: renewal-period,
+        renewal-count: u0,
+        last-renewed: current-time,
+        created-by: tx-sender
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (renew-document (document-hash (buff 32)))
+  (let
+    (
+      (expiration-data (unwrap! (map-get? document-expiration { document-hash: document-hash }) ERR_DOCUMENT_NOT_FOUND))
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (new-expiration-date (+ (get expiration-date expiration-data) (get renewal-period expiration-data)))
+    )
+    (asserts! (is-eq tx-sender (get created-by expiration-data)) ERR_UNAUTHORIZED)
+    (asserts! (get renewable expiration-data) ERR_DOCUMENT_EXPIRED)
+    
+    (map-set document-expiration
+      { document-hash: document-hash }
+      (merge expiration-data {
+        expiration-date: new-expiration-date,
+        renewal-count: (+ (get renewal-count expiration-data) u1),
+        last-renewed: current-time
+      })
+    )
+    
+    (map-delete expired-documents { document-hash: document-hash })
+    (ok new-expiration-date)
+  )
+)
+
+(define-read-only (is-document-expired (document-hash (buff 32)))
+  (match (map-get? document-expiration { document-hash: document-hash })
+    expiration-data
+      (let
+        (
+          (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+        )
+        (>= current-time (get expiration-date expiration-data))
+      )
+    false
+  )
+)
+
+(define-read-only (get-document-expiration-info (document-hash (buff 32)))
+  (map-get? document-expiration { document-hash: document-hash })
+)
+
+(define-read-only (get-days-until-expiration (document-hash (buff 32)))
+  (match (map-get? document-expiration { document-hash: document-hash })
+    expiration-data
+      (let
+        (
+          (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+          (expiration-time (get expiration-date expiration-data))
+        )
+        (if (>= current-time expiration-time)
+          (some u0)
+          (some (/ (- expiration-time current-time) u86400))
+        )
+      )
+    none
+  )
+)
+
+(define-public (mark-document-expired (document-hash (buff 32)))
+  (let
+    (
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    )
+    (asserts! (is-document-expired document-hash) ERR_DOCUMENT_NOT_FOUND)
+    
+    (map-set expired-documents
+      { document-hash: document-hash }
+      { expired-at: current-time }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-expiring-documents (days-ahead uint))
+  (let
+    (
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (target-time (+ current-time (* days-ahead u86400)))
+    )
+    (ok target-time)
+  )
 )
