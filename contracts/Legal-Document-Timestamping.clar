@@ -9,6 +9,12 @@
 (define-constant ERR_DOCUMENT_EXPIRED (err u203))
 (define-constant ERR_ALREADY_RENEWED (err u204))
 
+
+(define-constant ERR_DELEGATION_EXISTS (err u301))
+(define-constant ERR_DELEGATION_NOT_FOUND (err u302))
+(define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u303))
+
+
 (define-data-var document-counter uint u0)
 
 (define-map documents
@@ -326,5 +332,98 @@
       (target-time (+ current-time (* days-ahead u86400)))
     )
     (ok target-time)
+  )
+)
+
+(define-map document-delegations
+  { document-hash: (buff 32), delegate: principal }
+  {
+    granted-by: principal,
+    granted-at: uint,
+    permissions: uint,
+    active: bool
+  }
+)
+
+(define-map delegation-audit
+  { document-hash: (buff 32), action-id: uint }
+  {
+    delegate: principal,
+    action-type: (string-ascii 20),
+    performed-at: uint,
+    granted-by: principal
+  }
+)
+
+(define-data-var delegation-action-counter uint u0)
+
+(define-public (delegate-document-permissions (document-hash (buff 32)) (delegate principal) (permissions uint))
+  (let
+    (
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (document-exists (check-document-existence document-hash))
+    )
+    (asserts! document-exists ERR_DOCUMENT_NOT_FOUND)
+    (asserts! (not (is-eq tx-sender delegate)) ERR_CANNOT_DELEGATE_TO_SELF)
+    (asserts! (is-none (map-get? document-delegations { document-hash: document-hash, delegate: delegate })) ERR_DELEGATION_EXISTS)
+    
+    (map-set document-delegations
+      { document-hash: document-hash, delegate: delegate }
+      {
+        granted-by: tx-sender,
+        granted-at: current-time,
+        permissions: permissions,
+        active: true
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (document-hash (buff 32)) (delegate principal))
+  (let
+    (
+      (delegation-info (unwrap! (map-get? document-delegations { document-hash: document-hash, delegate: delegate }) ERR_DELEGATION_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get granted-by delegation-info)) ERR_UNAUTHORIZED)
+    
+    (map-set document-delegations
+      { document-hash: document-hash, delegate: delegate }
+      (merge delegation-info { active: false })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (check-delegation-permission (document-hash (buff 32)) (delegate principal))
+  (match (map-get? document-delegations { document-hash: document-hash, delegate: delegate })
+    delegation-info
+      (and (get active delegation-info) (> (get permissions delegation-info) u0))
+    false
+  )
+)
+
+(define-public (delegated-verify-document (document-hash (buff 32)) (verification-status bool))
+  (let
+    (
+      (has-permission (check-delegation-permission document-hash tx-sender))
+      (action-id (+ (var-get delegation-action-counter) u1))
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (delegation-info (unwrap! (map-get? document-delegations { document-hash: document-hash, delegate: tx-sender }) ERR_DELEGATION_NOT_FOUND))
+    )
+    (asserts! has-permission ERR_UNAUTHORIZED)
+    
+    (var-set delegation-action-counter action-id)
+    
+    (map-set delegation-audit
+      { document-hash: document-hash, action-id: action-id }
+      {
+        delegate: tx-sender,
+        action-type: "verification",
+        performed-at: current-time,
+        granted-by: (get granted-by delegation-info)
+      }
+    )
+    (ok true)
   )
 )
