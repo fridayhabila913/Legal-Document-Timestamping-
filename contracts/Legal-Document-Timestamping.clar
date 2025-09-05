@@ -14,6 +14,13 @@
 (define-constant ERR_DELEGATION_NOT_FOUND (err u302))
 (define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u303))
 
+(define-constant ERR_TAG_ALREADY_EXISTS (err u401))
+(define-constant ERR_TAG_NOT_FOUND (err u402))
+(define-constant ERR_TAG_LIMIT_EXCEEDED (err u403))
+(define-constant ERR_INVALID_TAG_NAME (err u404))
+
+(define-constant MAX_TAGS_PER_DOCUMENT u10)
+
 
 (define-data-var document-counter uint u0)
 
@@ -426,4 +433,111 @@
     )
     (ok true)
   )
+)
+
+
+
+(define-map document-tags
+  { document-id: uint, tag-index: uint }
+  { tag-name: (string-ascii 50) }
+)
+
+(define-map document-tag-counts
+  { document-id: uint }
+  { count: uint }
+)
+
+(define-map tag-document-counts
+  { tag-name: (string-ascii 50) }
+  { count: uint, first-used: uint }
+)
+
+(define-map tag-documents
+  { tag-name: (string-ascii 50), doc-index: uint }
+  { document-id: uint }
+)
+
+(define-public (tag-document (document-id uint) (tag-name (string-ascii 50)))
+  (let
+    (
+      (document (unwrap! (get-document document-id) ERR_DOCUMENT_NOT_FOUND))
+      (current-tag-count (default-to u0 (get count (map-get? document-tag-counts { document-id: document-id }))))
+      (tag-doc-count (default-to u0 (get count (map-get? tag-document-counts { tag-name: tag-name }))))
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    )
+    (asserts! (is-eq tx-sender (get author document)) ERR_UNAUTHORIZED)
+    (asserts! (> (len tag-name) u0) ERR_INVALID_TAG_NAME)
+    (asserts! (< current-tag-count MAX_TAGS_PER_DOCUMENT) ERR_TAG_LIMIT_EXCEEDED)
+    
+    (map-set document-tags
+      { document-id: document-id, tag-index: current-tag-count }
+      { tag-name: tag-name }
+    )
+    
+    (map-set document-tag-counts
+      { document-id: document-id }
+      { count: (+ current-tag-count u1) }
+    )
+    
+    (map-set tag-documents
+      { tag-name: tag-name, doc-index: tag-doc-count }
+      { document-id: document-id }
+    )
+    
+    (map-set tag-document-counts
+      { tag-name: tag-name }
+      {
+        count: (+ tag-doc-count u1),
+        first-used: (if (is-eq tag-doc-count u0) current-time (get first-used (unwrap-panic (map-get? tag-document-counts { tag-name: tag-name }))))
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-document-tags (document-id uint))
+  (let
+    (
+      (tag-count (default-to u0 (get count (map-get? document-tag-counts { document-id: document-id }))))
+    )
+    (ok (filter is-some-tag (map get-document-tag-at-index (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9))))
+  )
+)
+
+(define-private (get-document-tag-at-index (index uint))
+  (map-get? document-tags { document-id: u1, tag-index: index })
+)
+
+(define-private (is-some-tag (tag-data (optional { tag-name: (string-ascii 50) })))
+  (is-some tag-data)
+)
+
+(define-read-only (get-documents-by-tag (tag-name (string-ascii 50)))
+  (let
+    (
+      (doc-count (default-to u0 (get count (map-get? tag-document-counts { tag-name: tag-name }))))
+    )
+    (ok (filter is-some-doc-id (map get-tag-document-at-index (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9))))
+  )
+)
+
+(define-private (get-tag-document-at-index (index uint))
+  (map-get? tag-documents { tag-name: "", doc-index: index })
+)
+
+(define-private (is-some-doc-id (doc-ref (optional { document-id: uint })))
+  (is-some doc-ref)
+)
+
+(define-read-only (get-tag-stats (tag-name (string-ascii 50)))
+  (map-get? tag-document-counts { tag-name: tag-name })
+)
+
+(define-read-only (get-author-tag-portfolio (author principal))
+  (ok {
+    total-documents: (get-author-document-count author),
+    unique-tags: u0,
+    most-used-tag: ""
+  })
 )
