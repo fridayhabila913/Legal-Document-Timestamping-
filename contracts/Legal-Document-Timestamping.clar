@@ -21,6 +21,12 @@
 
 (define-constant MAX_TAGS_PER_DOCUMENT u10)
 
+(define-constant ERR_ALREADY_SIGNED (err u501))
+(define-constant ERR_SIGNATURE_CHAIN_NOT_FOUND (err u502))
+(define-constant ERR_INVALID_SIGNATURE_MESSAGE (err u503))
+(define-constant ERR_MAX_SIGNERS_REACHED (err u504))
+
+(define-constant MAX_SIGNERS_PER_DOCUMENT u20)
 
 (define-data-var document-counter uint u0)
 
@@ -540,4 +546,124 @@
     unique-tags: u0,
     most-used-tag: ""
   })
+)
+
+(define-map signature-chains
+  { document-hash: (buff 32) }
+  {
+    initiator: principal,
+    created-at: uint,
+    total-signatures: uint,
+    chain-active: bool
+  }
+)
+
+(define-map signatures
+  { document-hash: (buff 32), signature-index: uint }
+  {
+    signer: principal,
+    signed-at: uint,
+    block-height: uint,
+    attestation: (string-ascii 200)
+  }
+)
+
+(define-map signer-status
+  { document-hash: (buff 32), signer: principal }
+  { has-signed: bool, signature-index: uint }
+)
+
+(define-public (initiate-signature-chain (document-hash (buff 32)) (initial-attestation (string-ascii 200)))
+  (let
+    (
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (document-exists (check-document-existence document-hash))
+    )
+    (asserts! document-exists ERR_DOCUMENT_NOT_FOUND)
+    (asserts! (is-none (map-get? signature-chains { document-hash: document-hash })) ERR_ALREADY_SIGNED)
+    (asserts! (> (len initial-attestation) u0) ERR_INVALID_SIGNATURE_MESSAGE)
+    
+    (map-set signature-chains
+      { document-hash: document-hash }
+      {
+        initiator: tx-sender,
+        created-at: current-time,
+        total-signatures: u1,
+        chain-active: true
+      }
+    )
+    
+    (map-set signatures
+      { document-hash: document-hash, signature-index: u0 }
+      {
+        signer: tx-sender,
+        signed-at: current-time,
+        block-height: stacks-block-height,
+        attestation: initial-attestation
+      }
+    )
+    
+    (map-set signer-status
+      { document-hash: document-hash, signer: tx-sender }
+      { has-signed: true, signature-index: u0 }
+    )
+    
+    (ok u0)
+  )
+)
+
+(define-public (sign-document (document-hash (buff 32)) (attestation (string-ascii 200)))
+  (let
+    (
+      (chain-data (unwrap! (map-get? signature-chains { document-hash: document-hash }) ERR_SIGNATURE_CHAIN_NOT_FOUND))
+      (current-signatures (get total-signatures chain-data))
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (already-signed (default-to false (get has-signed (map-get? signer-status { document-hash: document-hash, signer: tx-sender }))))
+    )
+    (asserts! (get chain-active chain-data) ERR_DOCUMENT_NOT_FOUND)
+    (asserts! (not already-signed) ERR_ALREADY_SIGNED)
+    (asserts! (< current-signatures MAX_SIGNERS_PER_DOCUMENT) ERR_MAX_SIGNERS_REACHED)
+    (asserts! (> (len attestation) u0) ERR_INVALID_SIGNATURE_MESSAGE)
+    
+    (map-set signatures
+      { document-hash: document-hash, signature-index: current-signatures }
+      {
+        signer: tx-sender,
+        signed-at: current-time,
+        block-height: stacks-block-height,
+        attestation: attestation
+      }
+    )
+    
+    (map-set signer-status
+      { document-hash: document-hash, signer: tx-sender }
+      { has-signed: true, signature-index: current-signatures }
+    )
+    
+    (map-set signature-chains
+      { document-hash: document-hash }
+      (merge chain-data { total-signatures: (+ current-signatures u1) })
+    )
+    
+    (ok current-signatures)
+  )
+)
+
+(define-read-only (get-signature-chain-info (document-hash (buff 32)))
+  (map-get? signature-chains { document-hash: document-hash })
+)
+
+(define-read-only (get-signature (document-hash (buff 32)) (signature-index uint))
+  (map-get? signatures { document-hash: document-hash, signature-index: signature-index })
+)
+
+(define-read-only (has-signer-signed (document-hash (buff 32)) (signer principal))
+  (default-to false (get has-signed (map-get? signer-status { document-hash: document-hash, signer: signer })))
+)
+
+(define-read-only (get-total-signatures (document-hash (buff 32)))
+  (match (map-get? signature-chains { document-hash: document-hash })
+    chain-data (some (get total-signatures chain-data))
+    none
+  )
 )
