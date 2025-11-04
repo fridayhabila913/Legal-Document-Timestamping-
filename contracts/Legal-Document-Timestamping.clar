@@ -667,3 +667,83 @@
     none
   )
 )
+
+(define-map version-chains
+  { document-hash: (buff 32) }
+  {
+    parent-hash: (buff 32),
+    version-number: uint,
+    registered-by: principal,
+    registered-at: uint,
+    version-notes: (string-ascii 200),
+    is-latest: bool
+  }
+)
+
+(define-map version-roots
+  { root-hash: (buff 32) }
+  { total-versions: uint, latest-hash: (buff 32) }
+)
+
+(define-public (register-document-version 
+  (parent-hash (buff 32)) 
+  (new-hash (buff 32)) 
+  (version-notes (string-ascii 200)))
+  (let
+    (
+      (parent-exists (check-document-existence parent-hash))
+      (new-exists (check-document-existence new-hash))
+      (parent-version-data (map-get? version-chains { document-hash: parent-hash }))
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (root-hash (if (is-some parent-version-data)
+                     (get parent-hash (unwrap-panic parent-version-data))
+                     parent-hash))
+      (root-data (map-get? version-roots { root-hash: root-hash }))
+      (new-version-num (if (is-some root-data)
+                          (+ (get total-versions (unwrap-panic root-data)) u1)
+                          u2))
+    )
+    (asserts! parent-exists ERR_DOCUMENT_NOT_FOUND)
+    (asserts! new-exists ERR_DOCUMENT_NOT_FOUND)
+    (asserts! (not (is-eq parent-hash new-hash)) ERR_INVALID_HASH)
+    
+    (if (is-some parent-version-data)
+      (map-set version-chains
+        { document-hash: parent-hash }
+        (merge (unwrap-panic parent-version-data) { is-latest: false }))
+      true)
+    
+    (map-set version-chains
+      { document-hash: new-hash }
+      {
+        parent-hash: parent-hash,
+        version-number: new-version-num,
+        registered-by: tx-sender,
+        registered-at: current-time,
+        version-notes: version-notes,
+        is-latest: true
+      }
+    )
+    
+    (map-set version-roots
+      { root-hash: root-hash }
+      { total-versions: new-version-num, latest-hash: new-hash }
+    )
+    
+    (ok new-version-num)
+  )
+)
+
+(define-read-only (get-version-info (document-hash (buff 32)))
+  (map-get? version-chains { document-hash: document-hash })
+)
+
+(define-read-only (get-latest-version (root-hash (buff 32)))
+  (map-get? version-roots { root-hash: root-hash })
+)
+
+(define-read-only (is-latest-version (document-hash (buff 32)))
+  (match (map-get? version-chains { document-hash: document-hash })
+    version-data (get is-latest version-data)
+    true)
+)
